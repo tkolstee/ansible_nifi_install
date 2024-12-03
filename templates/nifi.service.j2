@@ -1,0 +1,20 @@
+[Unit]
+Description=Apache NiFi
+After=network.target
+After=sssd.service vasd.service
+
+[Service]
+Type=forking
+User={{ nifi_user }}
+Group={{ nifi_group }}
+Environment="JAVA_HOME=/usr"
+ExecStart={{ nifi_inst_dir }}/bin/nifi.sh start
+ExecStop={{ nifi_inst_dir }}/bin/nifi.sh stop
+ExecRestart={{ nifi_inst_dir }}/bin/nifi.sh restart 
+PIDFile={{ nifi_inst_dir }}/run/nifi.pid
+{% if (nifi_delay_secs | int) > 0 %}
+ExecStartPre=/bin/sleep {{ nifi_delay_secs }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

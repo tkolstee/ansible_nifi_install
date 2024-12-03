@@ -1,0 +1,125 @@
+---
+- name: "Get playbook parameters"
+  ansible.builtin.set_fact:
+    nifi_version: "{{ lookup('env', 'NIFI_VERSION') or '1.28.1' }}"
+    nifi_root: "{{ lookup('env', 'NIFI_ROOT') or '/opt/nifi' }}"
+    nifi_user: "{{ lookup('env', 'NIFI_USER') or 'nifi' }}"
+    nifi_group: "{{ lookup('env', 'NIFI_GROUP') or 'nifi' }}"
+    nifi_delay_secs: "{{ (lookup('env', 'NIFI_DELAY_SECS') or 1) | int }}"
+- name: "Set additional facts"
+  ansible.builtin.set_fact:
+    nifi_inst_dir: "{{ nifi_root }}/nifi-{{ nifi_version }}"
+    nifi_propskey: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+    # nifi_keypass: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+    # nifi_trustpw: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    nifi_url: "{{ lookup('env', 'NIFI_URL') or 'https://download.apache.org/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip' }}"
+    nifi_sig_url: "{{ lookup('env', 'NIFI_SIG_URL') or 'https://downloads.apache.org/nifi/{{ nifi_version }}/nifi-{{ nifi_version }}-bin.zip.sha512' }}"
+- name: "Check if target already exists"
+  ansible.builtin.stat:
+    path: "{{ nifi_inst_dir }}"
+  register: nifi_root_stat
+# - name: "Stop if target already exists"
+#   ansible.builtin.fail:
+#     msg: "NiFi is already installed at {{ nifi_inst_dir }}"
+#   when: nifi_root_stat.stat.exists
+- name: "Skip installation if already present"
+  when: not nifi_root_stat.stat.exists
+  block:
+    - name: "Create group"
+      ansible.builtin.group:
+        name: "{{ nifi_group }}"
+        state: present
+    - name: "Create user"
+      ansible.builtin.user:
+        name: "{{ nifi_user }}"
+        state: present
+        group: "{{ nifi_group }}"
+    - name: "Install Java"
+      ansible.builtin.package:
+        name: java-11-openjdk
+        state: present
+    - name: "Create NiFi root directory"
+      ansible.builtin.file:
+        path: "{{ nifi_root }}"
+        state: directory
+        owner: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+        mode: "0700"
+    - name: "Download NiFi distribution"
+      ansible.builtin.get_url:
+        url: "{{ nifi_url }}"
+        dest: "{{ nifi_inst_dir }}-bin.zip"
+        checksum: "sha512:{{ nifi_sig_url }}"
+        owner: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+        mode: "0700"
+    - name: "Unzip Nifi Distribution"
+      ansible.builtin.unarchive:
+        src: "{{ nifi_root }}/nifi-{{ nifi_version }}-bin.zip"
+        dest: "{{ nifi_root }}"
+        remote_src: true
+        owner: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+    - name: "Create symlink"
+      ansible.builtin.file:
+        src: "{{ nifi_root }}/nifi-{{ nifi_version }}"
+        dest: "{{ nifi_root }}/nifi"
+        state: link
+        owner: "{{ nifi_user }}"
+        group: "{{ nifi_group }}"
+- name: "Change properties file"
+  ansible.builtin.lineinfile:
+    path: "{{ nifi_inst_dir }}/conf/nifi.properties"
+    regexp: "^\\s*{{ item.key }}\\s*="
+    line: "{{ item.key }}={{ item.value }}"
+  loop:
+    # - { key: "nifi.web.http.port", value: "8080" }
+    - { key: "nifi.web.https.host", value: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}" }
+    # - { key: "nifi.sensitive.props.key", value: "{{ nifi_propskey }}" }
+    # - { key: "nifi.security.keystorePasswd", value: "{{ nifi_keypass }}" }
+    # - { key: "nifi.security.keyPasswd", value: "{{ nifi_keypass }}" }
+    # - { key: "nifi.security.truststorePasswd", value: "{{ nifi_trustpw }}" }
+# - name: "Remove https lines"
+#   ansible.builtin.lineinfile:
+#     path: "{{ nifi_inst_dir }}/conf/nifi.properties"
+#     regexp: "^\\s*{{ item }}\\s*="
+#     state: absent
+#   loop:
+#     - "nifi.web.https.port"
+#     - "nifi.sensitive.props.key"
+#     - "nifi.security.keystorePasswd"
+#     - "nifi.security.keyPasswd"
+#     - "nifi.security.truststorePasswd"
+- name: "Open firewall port"
+  ansible.posix.firewalld:
+    port: 8443/tcp
+    permanent: true
+    state: enabled
+    immediate: true
+- name: "Create systemd unit file"
+  ansible.builtin.template:
+    src: "nifi.service.j2"
+    dest: "/etc/systemd/system/nifi.service"
+    owner: root
+    group: root
+    mode: "0644"
+- name: "Reload systemd"
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+    enabled: true
+    state: started
+    name: nifi
+
+- name: "Wait for NiFi to start"
+  ansible.builtin.wait_for:
+    host: "{{ ansible_hostname }}"
+    port: 8443
+    delay: 10
+    timeout: 300
+- name: "Get username and password from application log"
+  ansible.builtin.command: "grep -E 'Generated (Username|Password)' {{ nifi_inst_dir }}/logs/nifi-app.log"
+  register: userpass
+  changed_when: false
+- name: "Display the generated username and password"
+  ansible.builtin.debug:
+    msg: "{{ userpass.stdout }}"
